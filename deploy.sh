@@ -59,6 +59,20 @@ fi
 
 VARS=$(printf '$%s ' "${REQUIRED[@]}" "${OPTIONAL[@]}")
 
+# Which service reads which file. A rendered file only takes effect when the
+# process reading it restarts: `docker compose up -d` leaves a container alone
+# when only a bind-mounted file changed, so a config-only deploy would otherwise
+# report success while the old configuration is still live.
+service_for() {
+    case "$1" in
+        config/dendrite.yaml)     echo monolith ;;
+        livekit/livekit.yaml)     echo livekit ;;
+        coturn/turnserver.conf)   echo coturn ;;
+        element-call/config.json) echo element-call ;;
+    esac
+}
+
+restart_services=""
 for f in config/dendrite.yaml livekit/livekit.yaml coturn/turnserver.conf \
          element-call/config.json; do
     [ -f "$f.tmpl" ] || { echo "missing template: $f.tmpl" >&2; exit 1; }
@@ -71,6 +85,7 @@ for f in config/dendrite.yaml livekit/livekit.yaml coturn/turnserver.conf \
         mv "$tmp" "$f"
         chmod 644 "$f"
         echo "rendered $f"
+        restart_services="$restart_services $(service_for "$f")"
     fi
 done
 
@@ -83,6 +98,14 @@ if [ "${PULL:-0}" = "1" ]; then
 fi
 
 docker compose up -d
+
+# Pick up any config rendered above. up -d already recreated anything whose
+# compose definition changed; restarting those again is harmless.
+if [ -n "$restart_services" ]; then
+    echo "restarting for changed config:$restart_services"
+    # shellcheck disable=SC2086
+    docker compose restart $restart_services
+fi
 
 echo "waiting for the homeserver to answer..."
 for _ in $(seq 1 30); do
