@@ -186,6 +186,18 @@ jobs:
 
       - name: Confirm the homeserver is serving
         run: |
-          code=$(curl -sS -o /dev/null -w '%{http_code}' "$HEALTHCHECK_URL")
-          echo "public endpoint returned $code"
-          [ "$code" = "200" ]
+          # deploy.sh already waited for the homeserver itself. This checks the
+          # public path through the reverse proxy, which briefly keeps serving
+          # 502 after a container restart because it has the old upstream marked
+          # down - so retry rather than judge on a single request.
+          for i in $(seq 1 15); do
+            code=$(curl -sS -o /dev/null -m 10 -w '%{http_code}' "$HEALTHCHECK_URL" || echo 000)
+            if [ "$code" = "200" ]; then
+              echo "public endpoint returned 200 after ${i} attempt(s)"
+              exit 0
+            fi
+            echo "attempt $i: $code"
+            sleep 4
+          done
+          echo "public endpoint never returned 200 (last: $code)"
+          exit 1
