@@ -82,21 +82,48 @@ jobs:
           INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
           INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
         run: |
+          # Tolerate a trailing slash or an accidental /api suffix in the secret:
+          # "host:8080/" + "/api/..." produces "//api/..." which the router 404s.
+          INFISICAL_URL="${INFISICAL_URL%/}"
+          INFISICAL_URL="${INFISICAL_URL%/api}"
+          echo "INFISICAL_URL=$INFISICAL_URL"   # value is masked by Actions
+
+          # Preflight, so an unreachable or misaddressed vault is distinguishable
+          # from a credential problem.
+          status=$(curl -sS -o /dev/null -w '%{http_code}' -m 15 "$INFISICAL_URL/api/status" || echo 000)
+          echo "GET /api/status -> $status"
+          if [ "$status" != "200" ]; then
+            echo "cannot reach the vault at that URL (expected 200 from /api/status)"
+            exit 1
+          fi
+
           # Called against the REST API rather than the Infisical CLI: the CLI
           # requests /api/v4/secrets, which self-hosted instances do not serve.
-          token=$(curl -sS --fail-with-body -m 30 -X POST \
+          resp=$(curl -sS -m 30 -w '\n%{http_code}' -X POST \
             -H 'Content-Type: application/json' \
             -d "$(jq -nc --arg id "$INFISICAL_CLIENT_ID" --arg sec "$INFISICAL_CLIENT_SECRET" \
                   '{clientId:$id, clientSecret:$sec}')" \
-            "$INFISICAL_URL/api/v1/auth/universal-auth/login" | jq -r '.accessToken // empty')
-          if [ -z "$token" ]; then echo "vault login failed"; exit 1; fi
+            "$INFISICAL_URL/api/v1/auth/universal-auth/login")
+          code=$(printf '%s' "$resp" | tail -n1)
+          body=$(printf '%s' "$resp" | sed '$d')
+          if [ "$code" != "200" ]; then
+            echo "vault login failed: HTTP $code"
+            printf '%s' "$body" | head -c 400
+            exit 1
+          fi
+          token=$(printf '%s' "$body" | jq -r '.accessToken // empty')
+          if [ -z "$token" ]; then echo "login returned no accessToken"; exit 1; fi
           echo "::add-mask::$token"
 
           # recursive=true so the folder layout (/ci, /ssh, /db, ...) is free to
           # change without touching this workflow. Key names are unique.
-          curl -sS --fail-with-body -m 30 -H "Authorization: Bearer $token" \
-            "$INFISICAL_URL/api/v3/secrets/raw?workspaceId=$PROJECT_ID&environment=prod&secretPath=%2F&recursive=true" \
-            > secrets.json
+          code=$(curl -sS -m 30 -o secrets.json -w '%{http_code}' -H "Authorization: Bearer $token" \
+            "$INFISICAL_URL/api/v3/secrets/raw?workspaceId=$PROJECT_ID&environment=prod&secretPath=%2F&recursive=true")
+          if [ "$code" != "200" ]; then
+            echo "fetching secrets failed: HTTP $code"
+            head -c 400 secrets.json
+            exit 1
+          fi
 
           count=$(jq '.secrets | length' secrets.json)
           echo "fetched $count secrets"
