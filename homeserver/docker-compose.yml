@@ -24,7 +24,6 @@ services:
   monolith:
     hostname: monolith
     image: matrixdotorg/dendrite-monolith:latest
-    command: ["-really-enable-open-registration" ]
     ports:
       - 8008:8008
       - 8448:8448
