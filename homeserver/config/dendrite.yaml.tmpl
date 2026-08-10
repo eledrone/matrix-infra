@@ -298,10 +298,13 @@ sync_api:
   # Configuration for the full-text search engine.
   search:
     # Whether or not search is enabled.
-    enabled: false
+    enabled: true
 
     # The path where the search index will be created in.
-    index_path: "./searchindex"
+    # Absolute, so it lands on the volume docker-compose mounts for it. The
+    # upstream default is relative and would resolve against the container's
+    # working directory instead, putting the index inside the config mount.
+    index_path: "/var/dendrite/searchindex"
 
     # The language most likely to be used on the server - used when indexing, to
     # ensure the returned results match expectations. A full list of possible languages
