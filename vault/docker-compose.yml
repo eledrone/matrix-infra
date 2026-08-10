@@ -1,0 +1,85 @@
+# Self-hosted Infisical - the secrets vault.
+#
+# Lives in its OWN stack (~/docker/vault), deliberately separate from the matrix
+# stack, so that redeploying the homeserver can never take the vault down.
+#
+# Why Infisical rather than HashiCorp Vault: you asked for project separation and
+# per-repo restriction. Infisical gives you Projects -> Environments -> Folders
+# with machine identities scoped per project, through a UI, and it survives a
+# reboot unattended. HashiCorp Vault is more powerful but seals itself on every
+# restart, and auto-unseal needs a cloud KMS you do not have.
+#
+# One-time setup:
+#   mkdir -p ~/docker/vault && cd ~/docker/vault
+#   cp <this file> docker-compose.yml
+#   # generate the two bootstrap secrets (these live ONLY here, not in the vault):
+#   {
+#     echo "ENCRYPTION_KEY=$(openssl rand -hex 16)"
+#     echo "AUTH_SECRET=$(openssl rand -base64 32)"
+#     echo "POSTGRES_PASSWORD=$(openssl rand -hex 24)"
+#   } > .env && chmod 600 .env
+#   docker compose up -d
+#
+# Then open http://<server-lan-ip>:8080, create the admin account, and:
+#   1. create project "matrix-infra", environment "prod"
+#   2. add the secrets that scripts/make-templates.py reported, plus SSH_PRIVATE_KEY
+#   3. create a machine identity with READ-ONLY access to that project only
+#      -> its token is what goes into the GitHub org secret INFISICAL_TOKEN
+#
+# Back up ENCRYPTION_KEY somewhere off this machine. Without it the vault's
+# contents are unrecoverable, including the SSH key CI needs to reach the server.
+
+# Pinned so container names never depend on the directory name. Without this,
+# moving or renaming the directory renames every container - which is exactly how
+# the homeserver broke when dendrite.yaml referenced matrix-postgres-1 by name.
+name: vault
+
+services:
+  db:
+    image: postgres:15-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: infisical
+      POSTGRES_DB: infisical
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes:
+      - vault_db:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U infisical"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks: [vault]
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - vault_redis:/data
+    networks: [vault]
+
+  infisical:
+    image: infisical/infisical:latest-postgres
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      AUTH_SECRET: ${AUTH_SECRET}
+      DB_CONNECTION_URI: postgres://infisical:${POSTGRES_PASSWORD}@db:5432/infisical
+      REDIS_URL: redis://redis:6379
+      SITE_URL: http://${VAULT_BIND_IP}:8080
+      TELEMETRY_ENABLED: "false"
+    ports:
+      # Bound to the tailnet address only: not on the LAN, not on the internet.
+      # Reachable solely by devices on your tailnet, which includes the CI runner.
+      - "${VAULT_BIND_IP}:8080:8080"
+    networks: [vault]
+
+networks:
+  vault:
+
+volumes:
+  vault_db:
+  vault_redis:

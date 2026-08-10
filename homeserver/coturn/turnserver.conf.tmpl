@@ -1,0 +1,13 @@
+listening-port=3478
+fingerprint
+use-auth-secret
+static-auth-secret=${TURN_SHARED_SECRET}
+realm=${MATRIX_DOMAIN}
+total-quota=100
+stale-nonce=600
+min-port=55000
+max-port=55200
+listening-ip=${TURN_LISTENING_IP}
+relay-ip=${TURN_LISTENING_IP}
+external-ip=${TURN_EXTERNAL_IP}/${TURN_LISTENING_IP}
+no-cli

@@ -1,0 +1,150 @@
+name: deploy
+
+# Push to main -> validate -> deploy over the tailnet.
+#
+# Nothing about the deployment is hardcoded here. GitHub holds only what is
+# needed to reach the vault; every other value, including where to deploy and
+# the SSH key used to get there, is read from the vault at run time.
+#
+# GitHub secrets required:
+#   INFISICAL_URL           vault base url, reachable over the tailnet
+#   INFISICAL_PROJECT_ID    project holding the secrets
+#   INFISICAL_CLIENT_ID     machine identity (universal auth)
+#   INFISICAL_CLIENT_SECRET
+#   TS_OAUTH_CLIENT_ID      tailscale oauth client, tagged tag:ci
+#   TS_OAUTH_SECRET
+#
+# Vault /ci folder must contain:
+#   SERVER_HOST  SERVER_USER  DEPLOY_PATH  HEALTHCHECK_URL
+# Vault /ssh folder must contain:
+#   SSH_PRIVATE_KEY
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**/*.md"
+  workflow_dispatch:
+
+# Never let two deploys race on the same server.
+concurrency:
+  group: deploy-matrix
+  cancel-in-progress: false
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compose files are structurally valid
+        run: |
+          # Dummy values: we are only checking structure, not deploying.
+          export POSTGRES_PASSWORD=x LIVEKIT_KEY=x LIVEKIT_SECRET=x
+          export ENCRYPTION_KEY=x AUTH_SECRET=x
+          export MATRIX_DOMAIN=example.invalid CALL_DOMAIN=call.example.invalid
+          docker compose -f homeserver/docker-compose.yml config >/dev/null
+          docker compose -f vault/docker-compose.yml config >/dev/null
+          echo "compose OK (homeserver + vault)"
+
+      - name: Templates reference only known variables
+        run: |
+          # Any ${VAR} in a template that deploy.sh does not list would render
+          # empty in production. Fail here instead.
+          used=$(grep -rhoE '\$\{[A-Z_]+\}' homeserver/config/*.tmpl \
+                   homeserver/livekit/*.tmpl homeserver/coturn/*.tmpl \
+                 | tr -d '${}' | sort -u)
+          declared=$(grep -oE '^\s{4}[A-Z_]+$' deploy.sh | tr -d ' ' | sort -u)
+          bad=$(comm -23 <(echo "$used") <(echo "$declared") || true)
+          if [ -n "$bad" ]; then
+            echo "these template variables are not declared in deploy.sh:"; echo "$bad"; exit 1
+          fi
+          echo "all template variables are declared"
+
+  deploy:
+    needs: validate
+    runs-on: ubuntu-latest
+    env:
+      INFISICAL_URL: ${{ secrets.INFISICAL_URL }}
+      PROJECT_ID: ${{ secrets.INFISICAL_PROJECT_ID }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Join the tailnet
+        uses: tailscale/github-action@v3
+        with:
+          oauth-client-id: ${{ secrets.TS_OAUTH_CLIENT_ID }}
+          oauth-secret: ${{ secrets.TS_OAUTH_SECRET }}
+          tags: tag:ci
+
+      - name: Fetch secrets from the vault
+        env:
+          INFISICAL_CLIENT_ID: ${{ secrets.INFISICAL_CLIENT_ID }}
+          INFISICAL_CLIENT_SECRET: ${{ secrets.INFISICAL_CLIENT_SECRET }}
+        run: |
+          # Called against the REST API rather than the Infisical CLI: the CLI
+          # requests /api/v4/secrets, which self-hosted instances do not serve.
+          token=$(curl -sS --fail-with-body -m 30 -X POST \
+            -H 'Content-Type: application/json' \
+            -d "$(jq -nc --arg id "$INFISICAL_CLIENT_ID" --arg sec "$INFISICAL_CLIENT_SECRET" \
+                  '{clientId:$id, clientSecret:$sec}')" \
+            "$INFISICAL_URL/api/v1/auth/universal-auth/login" | jq -r '.accessToken // empty')
+          if [ -z "$token" ]; then echo "vault login failed"; exit 1; fi
+          echo "::add-mask::$token"
+
+          # recursive=true so the folder layout (/ci, /ssh, /db, ...) is free to
+          # change without touching this workflow. Key names are unique.
+          curl -sS --fail-with-body -m 30 -H "Authorization: Bearer $token" \
+            "$INFISICAL_URL/api/v3/secrets/raw?workspaceId=$PROJECT_ID&environment=prod&secretPath=%2F&recursive=true" \
+            > secrets.json
+
+          count=$(jq '.secrets | length' secrets.json)
+          echo "fetched $count secrets"
+          [ "$count" -gt 0 ] || { echo "vault returned no secrets"; exit 1; }
+
+          # Mask every single-line value so nothing leaks if a step echoes it.
+          jq -r '.secrets[] | select(.secretValue | contains("\n") | not) | .secretValue' \
+            secrets.json | while IFS= read -r v; do echo "::add-mask::$v"; done
+
+      - name: Resolve deployment target from the vault
+        run: |
+          get() { jq -r --arg k "$1" \
+            '.secrets[] | select(.secretKey == $k) | .secretValue' secrets.json; }
+          for k in SERVER_HOST SERVER_USER DEPLOY_PATH HEALTHCHECK_URL; do
+            v=$(get "$k")
+            [ -n "$v" ] || { echo "$k missing from the vault (/ci folder)"; exit 1; }
+            echo "::add-mask::$v"
+            echo "$k=$v" >> "$GITHUB_ENV"
+          done
+          echo "deployment target resolved"
+
+      - name: Deploy
+        run: |
+          # The SSH private key lives in the vault, so it never touches GitHub.
+          install -m 600 /dev/null deploy_key
+          jq -r '.secrets[] | select(.secretKey == "SSH_PRIVATE_KEY") | .secretValue' \
+            secrets.json > deploy_key
+          [ -s deploy_key ] || { echo "SSH_PRIVATE_KEY missing from the vault"; exit 1; }
+
+          # Everything except the CI plumbing becomes the homeserver's .env.
+          jq -r '.secrets[]
+                 | select(.secretKey | IN("SSH_PRIVATE_KEY","SERVER_HOST","SERVER_USER",
+                                          "DEPLOY_PATH","HEALTHCHECK_URL") | not)
+                 | "\(.secretKey)=\(.secretValue)"' secrets.json > env.deploy
+
+          SSH="ssh -i deploy_key -o StrictHostKeyChecking=accept-new"
+          $SSH "$SERVER_USER@$SERVER_HOST" "cd $DEPLOY_PATH && git pull --ff-only"
+          scp -i deploy_key -o StrictHostKeyChecking=accept-new \
+            env.deploy "$SERVER_USER@$SERVER_HOST:$DEPLOY_PATH/homeserver/.env"
+          $SSH "$SERVER_USER@$SERVER_HOST" \
+            "chmod 600 $DEPLOY_PATH/homeserver/.env && $DEPLOY_PATH/deploy.sh"
+
+      - name: Scrub local secret material
+        if: always()
+        run: rm -f deploy_key secrets.json env.deploy
+
+      - name: Confirm the homeserver is serving
+        run: |
+          code=$(curl -sS -o /dev/null -w '%{http_code}' "$HEALTHCHECK_URL")
+          echo "public endpoint returned $code"
+          [ "$code" = "200" ]

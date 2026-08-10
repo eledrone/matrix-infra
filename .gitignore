@@ -1,0 +1,24 @@
+# ---- secrets: never commit ----
+homeserver/.env
+vault/.env
+homeserver/matrix_key.pem
+homeserver/server.key
+*.orig
+*.prev
+
+# ---- rendered from .tmpl at deploy time (the .tmpl files ARE committed) ----
+homeserver/config/dendrite.yaml
+homeserver/livekit/livekit.yaml
+homeserver/coturn/turnserver.conf
+homeserver/element-call/config.json
+
+# ---- runtime state: large, machine-local, or root-owned ----
+homeserver/dendrite_postgres_data/
+homeserver/dendrite_media/
+homeserver/dendrite_jetstream/
+homeserver/dendrite_search_index/
+homeserver/config/media_store/
+homeserver/config/jetstream/
+homeserver/config/logs/
+homeserver/backups/
+homeserver/server.crt
