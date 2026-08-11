@@ -168,9 +168,12 @@ jobs:
           [ -s deploy_key ] || { echo "SSH_PRIVATE_KEY missing from the vault"; exit 1; }
 
           # Everything except the CI plumbing becomes the homeserver's .env.
+          # Excluded by key name, not by folder - anything CI-only must be listed
+          # here or it lands in the homeserver's .env, which has no use for it.
           jq -r '.secrets[]
                  | select(.secretKey | IN("SSH_PRIVATE_KEY","SERVER_HOST","SERVER_USER",
-                                          "DEPLOY_PATH","HEALTHCHECK_URL") | not)
+                                          "DEPLOY_PATH","HEALTHCHECK_URL",
+                                          "GH_PAT_MATRIX_INFRA") | not)
                  | "\(.secretKey)=\(.secretValue)"' secrets.json > env.deploy
 
           SSH="ssh -i deploy_key -o StrictHostKeyChecking=accept-new"
