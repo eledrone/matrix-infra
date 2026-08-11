@@ -24,6 +24,10 @@ services:
   monolith:
     hostname: monolith
     image: matrixdotorg/dendrite-monolith:latest
+    # Dendrite refuses to start with registration_disabled: false and no captcha
+    # unless open registration is confirmed on the command line. Remove this if
+    # registration is ever closed again, or if reCAPTCHA is configured.
+    command: ["-really-enable-open-registration"]
     ports:
       - 8008:8008
       - 8448:8448
