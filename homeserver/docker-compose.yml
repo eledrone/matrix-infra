@@ -75,7 +75,7 @@ services:
     restart: unless-stopped
 
   element-call:
-    image: ghcr.io/eledrone/eledrone-call@sha256:cae77f3f0ade9989c5cfbc52747bc5898dc405931bf77f86146008ff50d38ff4
+    image: ghcr.io/eledrone/eledrone-call@sha256:691416b9f46892d79823a272b99afc9af6de3a89dd57dda58ac8398ed13b33d8
     volumes:
       - ./element-call/config.json:/app/config.json:ro
     ports:
