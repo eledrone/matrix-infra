@@ -24,6 +24,10 @@ services:
   monolith:
     hostname: monolith
     image: matrixdotorg/dendrite-monolith:latest
+    # Dendrite refuses to start with registration_disabled: false and no captcha
+    # unless open registration is confirmed on the command line. Remove this if
+    # registration is ever closed again, or if reCAPTCHA is configured.
+    command: ["-really-enable-open-registration"]
     ports:
       - 8008:8008
       - 8448:8448
@@ -75,7 +79,8 @@ services:
     # member) only exist here. Published from the eledrone-call `livekit` branch
     # by its Build workflow. The GHCR package must be public, or this host needs
     # `docker login ghcr.io` with a token that can read packages.
-    image: ghcr.io/eledrone/eledrone-call:latest
+    # The digest is rewritten by the promotion workflow — do not pin to a tag.
+    image: ghcr.io/eledrone/eledrone-call@sha256:5397001a3f83d1341fda1b690da0013ce74e518af6667ea2e948f552951331fa
     volumes:
       - ./element-call/config.json:/app/config.json:ro
     ports:
