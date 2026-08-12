@@ -71,7 +71,11 @@ services:
     restart: unless-stopped
 
   element-call:
-    image: ghcr.io/element-hq/element-call:latest
+    # Our fork, not upstream: the volume controls (up to 200%, remembered per
+    # member) only exist here. Published from the eledrone-call `livekit` branch
+    # by its Build workflow. The GHCR package must be public, or this host needs
+    # `docker login ghcr.io` with a token that can read packages.
+    image: ghcr.io/eledrone/eledrone-call:latest
     volumes:
       - ./element-call/config.json:/app/config.json:ro
     ports:
